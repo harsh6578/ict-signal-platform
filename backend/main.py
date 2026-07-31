@@ -1,8 +1,14 @@
 from fastapi import FastAPI
 
-app = FastAPI(title="ICT Trading Signal Platform API")
+from core.config import settings
+
+app = FastAPI(title=settings.app_name)
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "ict-signal-platform-backend"}
+    return {
+        "status": "ok",
+        "service": "ict-signal-platform-backend",
+        "environment": settings.environment,
+    }
