@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ict_signal_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ict_admin
+      POSTGRES_PASSWORD: ict_dev_password_change_me
+      POSTGRES_DB: ict_signal_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
