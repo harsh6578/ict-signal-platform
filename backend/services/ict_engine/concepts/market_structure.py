@@ -181,3 +181,60 @@ def classify_protected_and_weak_swings(swings: list, events: list):
         classified.append(swing_copy)
 
     return classified
+def detect_internal_structure(candles: list, external_swings: list, internal_lookback: int = 1):
+    """
+    Detects internal (lower-timeframe-style) structure that forms
+    BETWEEN each pair of consecutive external swings.
+
+    External structure = the major, significant swings (already
+    detected via find_swing_highs_and_lows + filter_significant_swings).
+
+    Internal structure = smaller swings that form within a single
+    "leg" between two consecutive external swings, used for
+    entry timing and retracement analysis, independent of the
+    external trend.
+
+    candles: full list of Candle model instances, oldest to newest.
+    external_swings: the cleaned/filtered external swing list.
+    internal_lookback: lookback used for internal swing detection
+                        (kept small since each leg is a short window).
+
+    Returns a list of dicts like:
+        {
+            "leg_start": <external swing dict>,
+            "leg_end": <external swing dict>,
+            "leg_direction": "bullish" or "bearish",
+            "internal_swings": [ ...internal swing dicts... ],
+        }
+    """
+    legs = []
+
+    for i in range(len(external_swings) - 1):
+        leg_start = external_swings[i]
+        leg_end = external_swings[i + 1]
+
+        leg_direction = "bullish" if leg_end["price"] > leg_start["price"] else "bearish"
+
+        start_index = leg_start["index"]
+        end_index = leg_end["index"]
+
+        # The candles strictly between the two external swings
+        leg_candles = candles[start_index:end_index + 1]
+
+        if len(leg_candles) < (internal_lookback * 2) + 3:
+            # Not enough candles in this leg to meaningfully detect internal structure
+            internal_swings = []
+        else:
+            internal_swings = find_swing_highs_and_lows(leg_candles, lookback=internal_lookback)
+            # Re-map indexes back to the original full candle list, not the leg slice
+            for swing in internal_swings:
+                swing["index"] = swing["index"] + start_index
+
+        legs.append({
+            "leg_start": leg_start,
+            "leg_end": leg_end,
+            "leg_direction": leg_direction,
+            "internal_swings": internal_swings,
+        })
+
+    return legs
