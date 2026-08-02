@@ -269,3 +269,36 @@ def detect_internal_bos_and_choch(candles: list, legs: list):
         enriched_legs.append(leg_copy)
 
     return enriched_legs
+def detect_mss(candles: list, events: list, displacement_multiplier: float = 1.5):
+    """
+    Identifies which CHOCH events qualify as a true MSS (Market
+    Structure Shift) — a CHOCH confirmed by a displacement candle
+    (unusually large body relative to the recent average), which
+    ICT considers a much more reliable reversal signal than a plain
+    CHOCH alone.
+
+    candles: full candle list, oldest to newest.
+    events: BOS/CHOCH events list (from detect_bos_and_choch).
+    displacement_multiplier: how many times larger than the average
+        body size a candle's body must be to count as displacement.
+
+    Returns the same events list, with each CHOCH event updated to
+    include "is_mss": True/False.
+    """
+    body_sizes = [abs(c.close_price - c.open_price) for c in candles]
+    average_body_size = sum(body_sizes) / len(body_sizes) if body_sizes else 0
+
+    enriched_events = []
+    for event in events:
+        event_copy = dict(event)
+
+        if event["type"] == "CHOCH":
+            break_candle = event["break_candle"]
+            body_size = abs(break_candle.close_price - break_candle.open_price)
+            event_copy["is_mss"] = body_size >= (average_body_size * displacement_multiplier)
+        else:
+            event_copy["is_mss"] = False
+
+        enriched_events.append(event_copy)
+
+    return enriched_events
