@@ -152,3 +152,32 @@ def filter_significant_swings(swings: list):
             cleaned.append(swing)
 
     return cleaned
+def classify_protected_and_weak_swings(swings: list, events: list):
+    """
+    Classifies each swing as either "protected" (never broken while it
+    was structurally relevant) or "weak" (broken by a later BOS/CHOCH,
+    meaning the market treated it as an easy target rather than a
+    respected level).
+
+    swings: cleaned/filtered swing list (from filter_significant_swings).
+    events: BOS/CHOCH events list (from detect_bos_and_choch).
+
+    Returns the same swings list, with each swing dict updated to
+    include a new "strength" key: either "protected" or "weak".
+    """
+    broken_swing_indexes = set()
+
+    for event in events:
+        broken = event["broken_swing"]
+        broken_swing_indexes.add(broken["index"])
+
+    classified = []
+    for swing in swings:
+        swing_copy = dict(swing)
+        if swing["index"] in broken_swing_indexes:
+            swing_copy["strength"] = "weak"
+        else:
+            swing_copy["strength"] = "protected"
+        classified.append(swing_copy)
+
+    return classified
