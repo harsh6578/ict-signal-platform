@@ -238,3 +238,34 @@ def detect_internal_structure(candles: list, external_swings: list, internal_loo
         })
 
     return legs
+def detect_internal_bos_and_choch(candles: list, legs: list):
+    """
+    Runs BOS/CHOCH detection on the internal swings within each
+    external structure leg, producing "Internal BOS" / "Internal CHOCH"
+    events — structure shifts on a smaller scale than the main
+    external trend, used for entry timing.
+
+    candles: full candle list, oldest to newest.
+    legs: output of detect_internal_structure().
+
+    Returns the same legs list, with each leg dict updated to include
+    a new "internal_events" key containing BOS/CHOCH events scoped to
+    that leg's internal swings only.
+    """
+    enriched_legs = []
+
+    for leg in legs:
+        internal_swings = leg["internal_swings"]
+
+        if len(internal_swings) < 2:
+            internal_events = []
+        else:
+            internal_events = detect_bos_and_choch(candles, internal_swings)
+            for event in internal_events:
+                event["type"] = "INTERNAL_" + event["type"]
+
+        leg_copy = dict(leg)
+        leg_copy["internal_events"] = internal_events
+        enriched_legs.append(leg_copy)
+
+    return enriched_legs
