@@ -120,3 +120,35 @@ def detect_bos_and_choch(candles: list, swings: list):
             pending_low = None
 
     return events
+def filter_significant_swings(swings: list):
+    """
+    Cleans up a raw swing list so it strictly alternates between
+    swing_high and swing_low. When multiple swings of the same type
+    occur in a row (a common side-effect of small lookback noise),
+    only the most extreme one is kept (highest high, or lowest low).
+
+    swings: list of swing dicts from find_swing_highs_and_lows(),
+            already ordered oldest to newest.
+
+    Returns a cleaned list, still ordered oldest to newest, alternating
+    swing_high / swing_low.
+    """
+    if not swings:
+        return []
+
+    cleaned = [swings[0]]
+
+    for swing in swings[1:]:
+        last = cleaned[-1]
+
+        if swing["type"] == last["type"]:
+            # Same type as the last kept swing — keep whichever is more extreme
+            if swing["type"] == "swing_high" and swing["price"] > last["price"]:
+                cleaned[-1] = swing
+            elif swing["type"] == "swing_low" and swing["price"] < last["price"]:
+                cleaned[-1] = swing
+            # otherwise, discard this swing (the existing one is already more extreme)
+        else:
+            cleaned.append(swing)
+
+    return cleaned
