@@ -116,3 +116,124 @@ def detect_liquidity_sweeps(candles: list, swings: list):
                     break
 
     return sweeps
+def detect_resting_liquidity(swings: list, equal_groups: list, sweeps: list):
+    """
+    Identifies liquidity that has NOT yet been swept — i.e. still
+    "resting" and available as a future target for price (ICT's
+    "Draw On Liquidity" concept). Cross-references all known liquidity
+    (individual significant swings + equal highs/lows groups) against
+    the sweeps already detected.
+    """
+    swept_swing_indexes = {s["swept_swing"]["index"] for s in sweeps}
+
+    resting_individual = [
+        s for s in swings if s["index"] not in swept_swing_indexes
+    ]
+
+    resting_groups = [
+        g for g in equal_groups
+        if not any(s["index"] in swept_swing_indexes for s in g["swings"])
+    ]
+
+    return {
+        "resting_individual_swings": resting_individual,
+        "resting_equal_groups": resting_groups,
+    }
+def mark_bsl_ssl_zones(swings: list):
+    """
+    Explicitly labels each swing as a Buy Side Liquidity (BSL) zone
+    (swing highs) or Sell Side Liquidity (SSL) zone (swing lows).
+    """
+    zones = []
+    for swing in swings:
+        zone_type = "BSL" if swing["type"] == "swing_high" else "SSL"
+        zones.append({**swing, "liquidity_zone_type": zone_type})
+    return zones
+
+
+def analyze_liquidity(context):
+    """
+    Orchestrates the full Liquidity pipeline using a MarketContext
+    that has already had analyze_market_structure() run on it
+    (since liquidity detection depends on external swings).
+    """
+    candles = context.candles
+    swings = context.get_results("EXTERNAL_SWINGS")
+
+    zones = mark_bsl_ssl_zones(swings)
+    equal_groups = detect_equal_highs_and_lows(swings)
+    sweeps = detect_liquidity_sweeps(candles, swings)
+    resting = detect_resting_liquidity(swings, equal_groups, sweeps)
+
+    context.set_result("LIQUIDITY_ZONES", zones)
+    context.set_result("EQUAL_HIGHS_LOWS", equal_groups)
+    context.set_result("LIQUIDITY_SWEEPS", sweeps)
+    context.set_result("RESTING_LIQUIDITY", resting)
+
+    return context
+def detect_inducement(sweeps: list, resting: list):
+    """
+    Flags a sweep as "inducement" if a larger resting liquidity pool
+    exists further beyond it in the same direction — meaning this
+    sweep likely lured traders before price targets the bigger pool.
+    """
+    resting_swings = resting["resting_individual_swings"]
+    inducements = []
+
+    for sweep in sweeps:
+        swept = sweep["swept_swing"]
+        same_type_resting = [
+            s for s in resting_swings if s["type"] == swept["type"]
+        ]
+
+        for candidate in same_type_resting:
+            if swept["type"] == "swing_high" and candidate["price"] > swept["price"]:
+                inducements.append({"induced_swing": swept, "real_target": candidate, "sweep": sweep})
+                break
+            elif swept["type"] == "swing_low" and candidate["price"] < swept["price"]:
+                inducements.append({"induced_swing": swept, "real_target": candidate, "sweep": sweep})
+                break
+
+    return inducements
+
+
+def detect_trendline_liquidity(swings: list, min_points: int = 3):
+    """
+    Detects diagonal trendline liquidity: 3+ consecutive swing highs
+    forming a descending line, or 3+ consecutive swing lows forming
+    an ascending line.
+    """
+    highs = [s for s in swings if s["type"] == "swing_high"]
+    lows = [s for s in swings if s["type"] == "swing_low"]
+
+    trendlines = []
+
+    for i in range(len(highs) - min_points + 1):
+        window = highs[i:i + min_points]
+        if all(window[j]["price"] > window[j + 1]["price"] for j in range(len(window) - 1)):
+            trendlines.append({"type": "descending_trendline", "points": window})
+
+    for i in range(len(lows) - min_points + 1):
+        window = lows[i:i + min_points]
+        if all(window[j]["price"] < window[j + 1]["price"] for j in range(len(window) - 1)):
+            trendlines.append({"type": "ascending_trendline", "points": window})
+
+    return trendlines
+
+
+def detect_old_highs_lows(swings: list, resting: list, age_threshold: int = 30):
+    """
+    Flags resting swings as "old" if they are older (by candle index
+    distance from the most recent candle) than age_threshold candles.
+    """
+    if not swings:
+        return []
+
+    most_recent_index = max(s["index"] for s in swings)
+    resting_indexes = {s["index"] for s in resting["resting_individual_swings"]}
+
+    old_swings = [
+        s for s in swings
+        if s["index"] in resting_indexes and (most_recent_index - s["index"]) >= age_threshold
+    ]
+    return old_swings
