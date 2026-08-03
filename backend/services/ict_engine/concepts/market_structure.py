@@ -302,3 +302,32 @@ def detect_mss(candles: list, events: list, displacement_multiplier: float = 1.5
         enriched_events.append(event_copy)
 
     return enriched_events
+def analyze_market_structure(context):
+    """
+    Orchestrates the full Market Structure pipeline using a
+    MarketContext, and stores every intermediate + final result
+    back into the context so other concept modules (Liquidity, FVG,
+    Order Blocks, etc.) can reuse this work without recomputing it.
+
+    context: a MarketContext instance, already populated with candles.
+
+    Returns the same context, now enriched with market structure results.
+    """
+    candles = context.candles
+
+    raw_swings = find_swing_highs_and_lows(candles, lookback=3)
+    clean_swings = filter_significant_swings(raw_swings)
+
+    events = detect_bos_and_choch(candles, clean_swings)
+    events = detect_mss(candles, events)
+
+    classified_swings = classify_protected_and_weak_swings(clean_swings, events)
+
+    legs = detect_internal_structure(candles, clean_swings, internal_lookback=1)
+    legs = detect_internal_bos_and_choch(candles, legs)
+
+    context.set_result("EXTERNAL_SWINGS", classified_swings)
+    context.set_result("EXTERNAL_STRUCTURE_EVENTS", events)
+    context.set_result("INTERNAL_STRUCTURE_LEGS", legs)
+
+    return context
