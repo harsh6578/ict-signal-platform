@@ -96,3 +96,324 @@ def check_fvg_mitigation(fvg: dict, candles: list, fvg_index: int):
     result["mitigation_status"] = mitigation_status
     result["is_ifvg"] = is_ifvg
     return result
+def check_consequent_encroachment(
+    fvg: dict,
+    candles: list,
+    fvg_index: int,
+    validation_mode: str = "close_based",
+) -> dict:
+    """
+    Tracks price interaction with the Consequent Encroachment (CE) level —
+    the 50% midpoint of a Fair Value Gap.
+
+    ICT theory: the first reaction at CE is a key institutional decision point.
+    A "respected" CE (price reacts and moves away without invalidating) signals
+    strong continuation in the FVG's direction. A "broken" CE signals weakness
+    and increases the probability of full mitigation.
+
+    validation_mode:
+        "close_based" (default) - wick may pierce CE, but the candle CLOSE must
+            remain on the correct side of CE for the reaction to count as "respected".
+            A close through CE marks it "broken".
+        "strict" - even a wick touching/crossing CE on the wrong side immediately
+            marks it "broken". No penetration tolerance at all.
+
+    Returns a dict (copy of fvg) with:
+        ce_level        - the midpoint price (same as fvg['midpoint'])
+        ce_status       - "not_yet_tested" | "respected" | "broken"
+        ce_tested_at    - index of the candle where CE was first touched (or None)
+        ce_broken_at    - index of the candle where CE was closed through (or None)
+    """
+    top = fvg["top"]
+    bottom = fvg["bottom"]
+    midpoint = fvg["midpoint"]
+    is_bullish_fvg = fvg["type"] == "bullish_fvg"
+
+    ce_status = "not_yet_tested"
+    ce_tested_at = None
+    ce_broken_at = None
+
+    for i in range(fvg_index + 1, len(candles)):
+        candle = candles[i]
+
+        if is_bullish_fvg:
+            # bullish FVG: price should stay above CE. Touched when low <= midpoint.
+            touched = candle.low_price <= midpoint
+            if not touched:
+                continue
+
+            if ce_tested_at is None:
+                ce_tested_at = i
+
+            if validation_mode == "strict":
+                ce_status = "broken"
+                ce_broken_at = i
+                break
+            else:  # close_based
+                if candle.close_price < midpoint:
+                    ce_status = "broken"
+                    ce_broken_at = i
+                    break
+                else:
+                    ce_status = "respected"
+
+        else:
+            # bearish FVG: price should stay below CE. Touched when high >= midpoint.
+            touched = candle.high_price >= midpoint
+            if not touched:
+                continue
+
+            if ce_tested_at is None:
+                ce_tested_at = i
+
+            if validation_mode == "strict":
+                ce_status = "broken"
+                ce_broken_at = i
+                break
+            else:  # close_based
+                if candle.close_price > midpoint:
+                    ce_status = "broken"
+                    ce_broken_at = i
+                    break
+                else:
+                    ce_status = "respected"
+
+        # stop scanning once the FVG itself is fully mitigated —
+        # CE relevance ends once the whole gap is filled
+        if is_bullish_fvg and candle.close_price < bottom:
+            break
+        if not is_bullish_fvg and candle.close_price > top:
+            break
+
+    result = dict(fvg)
+    result["ce_level"] = midpoint
+    result["ce_status"] = ce_status
+    result["ce_tested_at"] = ce_tested_at
+    result["ce_broken_at"] = ce_broken_at
+    return result
+def detect_balanced_price_range(fvgs: list, max_candle_distance: int = None) -> list:
+    """
+    Detects Balanced Price Ranges (BPR) — ICT's highest-probability FVG-based
+    PD Array. A BPR forms where a bullish FVG and a bearish FVG overlap in
+    price, meaning both buy-side and sell-side institutional imbalances
+    exist at the same level. This is a stronger reaction zone than either
+    FVG alone.
+
+    ICT rule: overlap_top = min(fvg1.top, fvg2.top)
+              overlap_bottom = max(fvg1.bottom, fvg2.bottom)
+              valid only if overlap_top > overlap_bottom
+    The BPR's own CE (Consequent Encroachment) is the midpoint of the
+    overlap zone itself — NOT either source FVG's individual midpoint.
+
+    fvgs: list of FVG dicts from detect_fair_value_gaps().
+    max_candle_distance: optional engineering filter (not an ICT rule) —
+        if set, only pairs whose candle_3 indices are within this many
+        candles of each other are considered. None = no limit (matches
+        the literal ICT definition).
+
+    Returns a list of dicts:
+        {
+            "type": "bullish_bpr" or "bearish_bpr",
+            "top": ..., "bottom": ..., "midpoint": ...,   # overlap zone + its CE
+            "source_fvg_1": <fvg dict>,
+            "source_fvg_2": <fvg dict>,
+        }
+
+    Note: BPR type follows the direction of formation - a bullish BPR forms
+    when a bearish FVG is later overlapped by a bullish FVG (buy-side
+    resolution), and vice versa. We label it by which FVG formed second,
+    since that's the FVG whose direction price is currently resolving in.
+    """
+    bprs = []
+
+    for i in range(len(fvgs)):
+        for j in range(i + 1, len(fvgs)):
+            fvg_a = fvgs[i]
+            fvg_b = fvgs[j]
+
+            # must be opposite types to form a BPR
+            if fvg_a["type"] == fvg_b["type"]:
+                continue
+
+            if max_candle_distance is not None:
+                index_a = fvg_a["candle_3"].id if hasattr(fvg_a["candle_3"], "id") else None
+                index_b = fvg_b["candle_3"].id if hasattr(fvg_b["candle_3"], "id") else None
+                if index_a is not None and index_b is not None:
+                    if abs(index_a - index_b) > max_candle_distance:
+                        continue
+
+            overlap_top = min(fvg_a["top"], fvg_b["top"])
+            overlap_bottom = max(fvg_a["bottom"], fvg_b["bottom"])
+
+            if overlap_top <= overlap_bottom:
+                continue  # no actual overlap
+
+            # whichever FVG formed later determines the BPR's directional label
+            later_fvg = fvg_b if j > i else fvg_a
+            bpr_type = "bullish_bpr" if later_fvg["type"] == "bullish_fvg" else "bearish_bpr"
+
+            bprs.append({
+                "type": bpr_type,
+                "top": overlap_top,
+                "bottom": overlap_bottom,
+                "midpoint": (overlap_top + overlap_bottom) / 2,
+                "source_fvg_1": fvg_a,
+                "source_fvg_2": fvg_b,
+            })
+
+    return bprs
+def detect_stacked_fvgs(fvgs: list) -> list:
+    """
+    Detects FVG stacking — multiple same-direction Fair Value Gaps forming
+    consecutively within a single directional price expansion. ICT reads
+    this as a sign of extreme institutional urgency: the market is unlikely
+    to offer a deep retracement before reaching its target, so ICT traders
+    favor entries at the CE of the MOST RECENT gap in the stack rather than
+    waiting for a return to the earliest one.
+
+    fvgs: list of FVG dicts from detect_fair_value_gaps(), in chronological
+        order (oldest to newest — same order the detector produces).
+
+    A stack is a run of 2+ consecutive same-type FVGs in the list with no
+    opposite-type FVG breaking the sequence. "Consecutive" here means
+    adjacent in the fvgs list (i.e., no opposite-direction FVG occurred
+    between them) — it does NOT require candles to be back-to-back, since
+    a directional expansion often has non-FVG candles between each gap.
+
+    Returns a list of dicts:
+        {
+            "type": "bullish_stack" or "bearish_stack",
+            "fvgs": [<fvg1>, <fvg2>, ...],   # the gaps in the stack, in order
+            "entry_fvg": <fvg dict>,         # most recent gap - CE is the entry per ICT
+            "top": ..., "bottom": ...,       # full span of the stack
+        }
+    """
+    stacks = []
+    current_run = []
+
+    def flush_run():
+        if len(current_run) >= 2:
+            fvg_type = current_run[0]["type"]
+            stack_label = "bullish_stack" if fvg_type == "bullish_fvg" else "bearish_stack"
+            all_tops = [f["top"] for f in current_run]
+            all_bottoms = [f["bottom"] for f in current_run]
+            stacks.append({
+                "type": stack_label,
+                "fvgs": list(current_run),
+                "entry_fvg": current_run[-1],
+                "top": max(all_tops),
+                "bottom": min(all_bottoms),
+            })
+
+    for fvg in fvgs:
+        if current_run and fvg["type"] != current_run[-1]["type"]:
+            flush_run()
+            current_run = [fvg]
+        else:
+            current_run.append(fvg)
+
+    flush_run()  # catch the final run after the loop ends
+
+    return stacks
+def detect_nested_fvgs(htf_fvgs: list, ltf_fvgs: list) -> list:
+    """
+    Detects Nested FVGs — a lower-timeframe FVG whose price range forms
+    entirely inside a higher-timeframe FVG's price range. ICT treats the
+    HTF FVG as the target/context zone and the nested LTF FVG inside it
+    as the precise entry trigger ("layered institutional interest").
+
+    htf_fvgs: FVG dicts from detect_fair_value_gaps() run on HTF candles.
+    ltf_fvgs: FVG dicts from detect_fair_value_gaps() run on LTF candles.
+    (Caller is responsible for detecting each list on its own timeframe's
+    candles — this function only compares already-detected FVGs.)
+
+    Containment rule: ltf_fvg is nested inside htf_fvg when
+        ltf_fvg.top <= htf_fvg.top AND ltf_fvg.bottom >= htf_fvg.bottom
+    (the LTF gap's full range sits within the HTF gap's full range).
+
+    same_direction is reported (not filtered out) because both aligned
+    and counter-trend nestings are meaningful: same-direction nesting is
+    the classic HTF-target / LTF-entry setup; opposite-direction nesting
+    can flag an early reversal signal inside the HTF zone.
+
+    Returns a list of dicts:
+        {
+            "htf_fvg": <fvg dict>,
+            "ltf_fvg": <fvg dict>,
+            "same_direction": True/False,
+            "top": ltf_fvg["top"], "bottom": ltf_fvg["bottom"],
+            "midpoint": ltf_fvg["midpoint"],   # the LTF FVG is the entry zone
+        }
+    """
+    nested = []
+
+    for htf_fvg in htf_fvgs:
+        for ltf_fvg in ltf_fvgs:
+            is_contained = (
+                ltf_fvg["top"] <= htf_fvg["top"]
+                and ltf_fvg["bottom"] >= htf_fvg["bottom"]
+            )
+            if not is_contained:
+                continue
+
+            nested.append({
+                "htf_fvg": htf_fvg,
+                "ltf_fvg": ltf_fvg,
+                "same_direction": ltf_fvg["type"] == htf_fvg["type"],
+                "top": ltf_fvg["top"],
+                "bottom": ltf_fvg["bottom"],
+                "midpoint": ltf_fvg["midpoint"],
+            })
+
+    return nested
+def grade_fvg_quality(fvg: dict) -> dict:
+    """
+    Grades FVG formation quality based on displacement strength — ICT's
+    weak / quietly strong / exceptional tiering. Not every 3-candle gap
+    is a genuine institutional footprint; this checks HOW the gap formed,
+    not just that it exists.
+
+    Rule (official ICT):
+        - displacement_confirmed: candle_2 closes beyond candle_1's range
+            (bullish: candle_2.close > candle_1.high;
+             bearish: candle_2.close < candle_1.low)
+        - continuation_confirmed: candle_3 extends beyond candle_2's extreme
+            (bullish: candle_3.high > candle_2.high;
+             bearish: candle_3.low < candle_2.low)
+
+        quality = "exceptional"    if both confirmed
+                = "quietly_strong" if only displacement_confirmed
+                = "weak"           if displacement not confirmed at all
+
+    fvg: a single FVG dict from detect_fair_value_gaps() - must still have
+        candle_1/candle_2/candle_3 references (call this before stripping
+        candle objects, if you ever do so downstream).
+
+    Returns a dict (copy of fvg) with:
+        quality                 - "weak" | "quietly_strong" | "exceptional"
+        displacement_confirmed  - bool
+        continuation_confirmed  - bool
+    """
+    candle_1 = fvg["candle_1"]
+    candle_2 = fvg["candle_2"]
+    candle_3 = fvg["candle_3"]
+
+    if fvg["type"] == "bullish_fvg":
+        displacement_confirmed = candle_2.close_price > candle_1.high_price
+        continuation_confirmed = candle_3.high_price > candle_2.high_price
+    else:  # bearish_fvg
+        displacement_confirmed = candle_2.close_price < candle_1.low_price
+        continuation_confirmed = candle_3.low_price < candle_2.low_price
+
+    if displacement_confirmed and continuation_confirmed:
+        quality = "exceptional"
+    elif displacement_confirmed:
+        quality = "quietly_strong"
+    else:
+        quality = "weak"
+
+    result = dict(fvg)
+    result["quality"] = quality
+    result["displacement_confirmed"] = displacement_confirmed
+    result["continuation_confirmed"] = continuation_confirmed
+    return result
