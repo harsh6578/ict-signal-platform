@@ -417,3 +417,123 @@ def grade_fvg_quality(fvg: dict) -> dict:
     result["displacement_confirmed"] = displacement_confirmed
     result["continuation_confirmed"] = continuation_confirmed
     return result
+def classify_fvg_premium_discount(fvg: dict, dealing_range_top: float, dealing_range_bottom: float) -> dict:
+    """
+    Classifies an FVG's location relative to the Premium/Discount framework.
+
+    ICT rule: equilibrium = 50% midpoint of the dealing range (a significant
+    swing low to swing high, or vice versa - supplied by the caller, typically
+    from Market Structure swing detection). Above equilibrium = premium
+    (expensive, sell zone). Below equilibrium = discount (cheap, buy zone).
+
+    "Aligned" FVGs are the ones ICT actually trades: a bullish FVG sitting in
+    discount (buying cheap, in the direction of an expected upmove) or a
+    bearish FVG sitting in premium (selling expensive). A bullish FVG stuck
+    in premium, or a bearish FVG stuck in discount, is generally ignored -
+    it's fighting the framework, not using it.
+
+    fvg: a single FVG dict from detect_fair_value_gaps().
+    dealing_range_top: the swing high of the dealing range.
+    dealing_range_bottom: the swing low of the dealing range.
+
+    Returns a dict (copy of fvg) with:
+        equilibrium  - the 50% midpoint of the dealing range
+        zone         - "premium" | "discount" | "equilibrium"
+                       (based on the FVG's own midpoint vs equilibrium)
+        is_aligned   - True if the FVG's direction matches ICT's expected zone
+                       (bullish -> discount, bearish -> premium)
+    """
+    equilibrium = (dealing_range_top + dealing_range_bottom) / 2
+    fvg_midpoint = fvg["midpoint"]
+
+    if fvg_midpoint > equilibrium:
+        zone = "premium"
+    elif fvg_midpoint < equilibrium:
+        zone = "discount"
+    else:
+        zone = "equilibrium"
+
+    is_bullish = fvg["type"] == "bullish_fvg"
+    is_aligned = (is_bullish and zone == "discount") or (not is_bullish and zone == "premium")
+
+    result = dict(fvg)
+    result["equilibrium"] = equilibrium
+    result["zone"] = zone
+    result["is_aligned"] = is_aligned
+    return result
+def _same_fvg(fvg_a: dict, fvg_b: dict) -> bool:
+    """Identity check for FVGs across enriched copies - matches by the
+    original candle references, which stay stable through dict(fvg) copies."""
+    return (
+        fvg_a.get("candle_1") is fvg_b.get("candle_1")
+        and fvg_a.get("candle_3") is fvg_b.get("candle_3")
+    )
+
+
+def score_fvg_context(fvg: dict, stacks: list = None, nested_pairs: list = None, bprs: list = None) -> dict:
+    """
+    Scores an FVG's contextual importance by combining every FVG-internal
+    confluence built so far. NOT an official ICT numeric rule - ICT teaches
+    confluence qualitatively (more overlapping concepts = higher probability).
+    These point weights are an engineering interpretation for ranking/sorting
+    FVGs programmatically.
+
+    Designed to be extended later: once Order Blocks and Liquidity modules
+    exist, pass their outputs in as additional optional parameters and add
+    more scoring branches - existing callers won't break.
+
+    fvg: an FVG dict that should already be enriched by grade_fvg_quality()
+        and classify_fvg_premium_discount() (reads "quality" and "is_aligned"
+        if present; skips those factors silently if missing).
+    stacks: optional output of detect_stacked_fvgs().
+    nested_pairs: optional output of detect_nested_fvgs().
+    bprs: optional output of detect_balanced_price_range().
+
+    Returns a dict (copy of fvg) with:
+        confluence_score    - int, higher = more confluence
+        confluence_factors  - list of strings naming which factors fired
+    """
+    factors = []
+    score = 0
+
+    quality = fvg.get("quality")
+    if quality == "exceptional":
+        score += 2
+        factors.append("exceptional_displacement")
+    elif quality == "quietly_strong":
+        score += 1
+        factors.append("quietly_strong_displacement")
+
+    if fvg.get("is_aligned"):
+        score += 1
+        factors.append("aligned_with_premium_discount")
+
+    if stacks:
+        for stack in stacks:
+            if any(_same_fvg(fvg, f) for f in stack["fvgs"]):
+                score += 1
+                factors.append("part_of_stacked_fvgs")
+                break
+
+    if nested_pairs:
+        for pair in nested_pairs:
+            if _same_fvg(fvg, pair["htf_fvg"]) or _same_fvg(fvg, pair["ltf_fvg"]):
+                if pair["same_direction"]:
+                    score += 2
+                    factors.append("nested_same_direction")
+                else:
+                    score += 1
+                    factors.append("nested_opposite_direction")
+                break
+
+    if bprs:
+        for bpr in bprs:
+            if _same_fvg(fvg, bpr["source_fvg_1"]) or _same_fvg(fvg, bpr["source_fvg_2"]):
+                score += 2
+                factors.append("part_of_balanced_price_range")
+                break
+
+    result = dict(fvg)
+    result["confluence_score"] = score
+    result["confluence_factors"] = factors
+    return result
