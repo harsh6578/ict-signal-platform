@@ -43,3 +43,13 @@ print("Test 1 (expect mitigated):", result1["status"])
 test_candles_2 = [MockCandle2(98, 108, 97)]
 result2 = check_order_block_status(ob, test_candles_2, ob_index=-1)
 print("Test 2 (expect breaker):", result2["status"])
+from services.ict_engine.concepts.order_blocks import convert_to_breaker_block
+
+# Test: bullish OB breaks -> becomes bearish breaker, fresh status check
+breaker = convert_to_breaker_block(result2)  # result2 was our "breaker" bullish OB
+print("Breaker type:", breaker["type"], "birth_index:", breaker["birth_index"])
+
+# now test the breaker's own status with fresh candles after its birth
+breaker_candles = [MockCandle2(95, 100, 96)]  # wick into zone, holds -> mitigated
+breaker_result = check_order_block_status(breaker, breaker_candles, ob_index=-1)
+print("Breaker status (expect mitigated):", breaker_result["status"])
