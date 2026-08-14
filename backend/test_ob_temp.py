@@ -53,3 +53,12 @@ print("Breaker type:", breaker["type"], "birth_index:", breaker["birth_index"])
 breaker_candles = [MockCandle2(95, 100, 96)]  # wick into zone, holds -> mitigated
 breaker_result = check_order_block_status(breaker, breaker_candles, ob_index=-1)
 print("Breaker status (expect mitigated):", breaker_result["status"])
+from services.ict_engine.concepts.order_blocks import grade_order_block_strength, detect_nested_order_blocks
+
+graded = grade_order_block_strength(obs[0], candles, ob_index=0)
+print(graded["strength"], graded["strength_score"])
+
+htf_obs = [{"type": "bullish_ob", "top": 120, "bottom": 100}]
+ltf_obs = [{"type": "bullish_ob", "top": 112, "bottom": 105}]
+nested_obs = detect_nested_order_blocks(htf_obs, ltf_obs)
+print(len(nested_obs), nested_obs[0]["same_direction"] if nested_obs else None)
